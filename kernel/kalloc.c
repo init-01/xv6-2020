@@ -23,11 +23,21 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Stores reference count of pa instead of va <-> pa convergen.
+// only stores 37bit instead of 44 bit of physical address, but 0~PHYSTOP is 32bit so doesn't matter.
+struct {
+  struct spinlock lock;
+  pagetable_t reftable;
+} kref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
+  initlock(&kref.lock, "kref");
+  kref.reftable = (pagetable_t)kalloc();
+  memset(kref.reftable, 0, PGSIZE);
 }
 
 void
@@ -50,6 +60,10 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  // Memory reference counting for CoW
+  if(dec_ref(pa) > 0)
+    return;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -79,4 +93,74 @@ kalloc(void)
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+int inc_ref(void* pa){
+  pte_t *rte;
+  uint refcnt;
+  
+  if(kref.reftable == 0)
+    return 0;
+
+  acquire(&kref.lock);
+  rte = walk(kref.reftable, (uint64)pa, 1);
+  if(rte == 0){
+    release(&kref.lock);
+    return 0;
+  }
+  if((*rte & PTE_V) == 0){
+    refcnt = 1;
+    *rte = REF2RTE(1) | PTE_V | PTE_U;
+  }
+  else{
+    refcnt = RTE2REF(*rte) + 1;
+    *rte = REF2RTE(refcnt) | PTE_V | PTE_U;
+  }
+  release(&kref.lock);
+  return refcnt;
+}
+
+int dec_ref(void* pa){
+  pte_t *rte;
+  uint refcnt;
+
+  if(kref.reftable == 0)
+    return 0;
+
+  acquire(&kref.lock);
+  rte = walk(kref.reftable, (uint64)pa, 0);
+  if((rte == 0) || ((*rte & PTE_V) == 0)){
+    *rte = 0;
+    release(&kref.lock);
+    return 0;
+  }
+
+  refcnt = RTE2REF(*rte) - 1;
+  if(refcnt <= 0){
+    *rte = 0;
+  }
+  else{
+    *rte = REF2RTE(refcnt) | PTE_V | PTE_U;
+  }
+  release(&kref.lock);
+  return refcnt;
+}
+
+int see_ref(void *pa){
+  pte_t *rte;
+  uint refcnt;
+
+  if(kref.reftable == 0)
+    return -1;
+
+  acquire(&kref.lock);
+  rte = walk(kref.reftable, (uint64)pa, 0);
+  if((rte == 0) || ((*rte & PTE_V) == 0)){
+    release(&kref.lock);
+    return 0;
+  }
+
+  refcnt = RTE2REF(*rte);
+  release(&kref.lock);
+  return refcnt;
 }

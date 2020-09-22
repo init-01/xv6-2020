@@ -352,3 +352,6 @@ sfence_vma()
 
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
+
+#define RTE2REF(rte) (((uint64)rte) >> 10)
+#define REF2RTE(ref) (((uint64)ref) << 10)

@@ -220,6 +220,7 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
   mem = kalloc();
   memset(mem, 0, PGSIZE);
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
+  inc_ref(mem);
   memmove(mem, src, sz);
 }
 
@@ -238,6 +239,10 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   for(a = oldsz; a < newsz; a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
+      uvmdealloc(pagetable, a, oldsz);
+      return 0;
+    }
+    if(inc_ref(mem) == 0){
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
@@ -311,7 +316,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,13 +325,18 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    //if((mem = kalloc()) == 0)
+    //  goto err;
+    //memmove(mem, (char*)pa, PGSIZE);
+    // Copy on Write
+    *pte &= ~PTE_W;
+    flags &= ~PTE_W;
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      //kfree(mem);
       goto err;
     }
+    if(inc_ref((void*)pa) == 0)
+      goto err;
   }
   return 0;
 
@@ -355,10 +365,34 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    if(va0 > MAXVA)
+      return -1;
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return -1;
+    if((*pte & PTE_W) != 0)
+      pa0 = PTE2PA(*pte);
+    else if(see_ref((void*)PTE2PA(*pte)) == 1){
+      *pte = *pte | PTE_W;
+      pa0 = PTE2PA(*pte);
+    }
+    else{
+      // Allocate memory and copy content
+      pa0 = (uint64)kalloc();
+      if(pa0 == 0)
+        return -1;
+      if(inc_ref((void*)pa0) == 0){
+        kfree((void*)pa0);
+        return -1;
+      }
+      memmove((char*)pa0, (char*)PTE2PA(*pte), PGSIZE);
+      kfree((void*)PTE2PA(*pte));
+      *pte = PA2PTE(pa0) | PTE_FLAGS(*pte) | PTE_W;
+    }
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);

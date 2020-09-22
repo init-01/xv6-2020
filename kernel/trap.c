@@ -46,11 +46,13 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
+
+  uint64 scause = r_scause();
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  if(scause == 8){
     // system call
 
     if(p->killed)
@@ -67,14 +69,61 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(scause == 0xd || scause == 0xf){  //Load page pagefault && Store page fault
+    uint64 va = r_stval();
+    if(va >= p->sz)
+    {
+      p->killed = 1;
+      goto end;
+    }
+    va = PGROUNDDOWN(va);
+    pte_t *pte = walk(p->pagetable, va, 0);
+
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0){
+      p->killed = 1;
+      goto end;
+    }
+
+    //Copy on Write
+    if((*pte & PTE_W) == 0){
+      if(see_ref((void*)PTE2PA(*pte)) == 1){
+        *pte = *pte | PTE_W;
+        goto end;
+      }
+
+      // Allocate memory and copy content
+      char *pa = kalloc();
+      if(pa == 0){
+        p->killed = 1;
+        goto end;
+      }
+      if(inc_ref(pa) == 0){
+        kfree(pa);
+        p->killed = 1;
+        goto end;
+      }
+      memmove(pa, (char*)PTE2PA(*pte), PGSIZE);
+      kfree((void*)PTE2PA(*pte));
+      *pte = PA2PTE(pa) | PTE_FLAGS(*pte) | PTE_W;
+    }
+    else{
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+      goto end;
+    }
+
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if(p->killed)
+ end:
+
+  if(p->killed){
     exit(-1);
+    }
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
