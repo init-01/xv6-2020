@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "*.cpp": "cpp",
+        "types.h": "c",
+        "fs.h": "c",
+        "user.h": "c",
+        "stat.h": "c"
+    },
+    "files.exclude": {
+        "**/*.d": true,
+        "**/*.o": true,
+        "**/*.sym": true
+    }
+}
