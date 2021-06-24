@@ -12,11 +12,9 @@ main(int argc, char *argv[])
   }
 
   sleeptime = atoi(argv[1]);
-  fprintf(1, "sleeptime: %d\n", sleeptime);
   if(sleep(sleeptime) < 0){
     fprintf(2, "Something went wrong\n");
     exit(1);
   }
-  fprintf(1, "Wake\n");
   exit(0);
 }

@@ -38,7 +38,7 @@ int main(int argc, char *argv[]){
     char *ptr = buf;
     while(1){
         int _argc = argc - 1;
-        int stop = 0;
+        int stop;
         char* end = strchr(ptr, '\n');
 
         if(end){
@@ -54,26 +54,27 @@ int main(int argc, char *argv[]){
             _argv[i] = NULL;
         }
 
-        if(*ptr != '\0'){
-            //*end = '\0';
-            //Split buf and fill _argv
-            char* next;
-            do{
-                if((next = strchr(ptr, ' '))){
-                    *next = '\0';
-                    if(*ptr){   //skip zero length string
-                        _argv[_argc++] = ptr;
-                    }
-                    ptr = next + 1;
-                }
-                else{
-                    if(*ptr){
-                        _argv[_argc++] = ptr;
-                    }
-                }
-            }while(next);
-        }
+        //Split buf and fill _argv
+        char* next;
+        do{
+            if((next = strchr(ptr, ' '))){
+                *next = '\0';
+            }
+            if(*ptr){   //skip zero length string
+                _argv[_argc++] = ptr;
+            }
+            ptr = next? next + 1 : end + 1; //if next is null -> set ptr to end of string
+        }while(next);
 
+
+        if(_argc == argc - 1){  //nothing from stdin -> skip
+            if(stop){
+                break;
+            }
+            else{
+                continue;
+            }
+        }
 
         if(fork() == 0){
             exec(argv[1], _argv);
@@ -82,9 +83,6 @@ int main(int argc, char *argv[]){
             wait(0);
             if(stop){
                 break;
-            }
-            else{
-                ptr = end + 1;
             }
         }
     }
