@@ -21,3 +21,5 @@ xv6.out*
 .vagrant/
 submissions/
 .vscode/
+peda*
+.gdb_history
