@@ -21,6 +21,8 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern pagetable_t kernel_pagetable;
+
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -29,17 +31,18 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   for(p = proc; p < &proc[NPROC]; p++) {
-      initlock(&p->lock, "proc");
+    initlock(&p->lock, "proc");
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+    // Allocate a page for the process's kernel stack.
+    // Map it high in memory, followed by an invalid
+    // guard page.
+    char *pa = kalloc();
+    if(pa == 0)
+      panic("kalloc");
+    //uint64 va = KSTACK((int) (p - proc));
+    //kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    //p->kstack = va;
+    p->kstack = (uint64)pa;
   }
   kvminithart();
 }
@@ -121,6 +124,27 @@ found:
     return 0;
   }
 
+  // Copy kernel page table
+  if((p->kpagetable = (pagetable_t)kalloc()) == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  //for(int i = 0; i < (1<<9); ++i){
+  //  p->kpagetable[i] = kernel_pagetable[i];
+  //}
+  memmove(p->kpagetable, kernel_pagetable, sizeof(kernel_pagetable)*(1<<9));
+  
+  //allocate kernel stack to page table
+  uint64 pa = (uint64)(p->kstack);
+  uint64 va = KSTACK((int) (p - proc));
+  if(mappages(p->kpagetable, va, PGSIZE, pa, PTE_R | PTE_W) != 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -142,6 +166,17 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  //free kpagetable and unmap kstack
+  if(p->kpagetable){
+    if(p->kstack == KSTACK((int) (p - proc))){
+      uint64 kstack_va = p->kstack;
+      uint64 kstack_pa = kwalkaddr(p->kpagetable, kstack_va);
+      p->kstack = kstack_pa;
+      uvmunmap(p->kpagetable, kstack_va, 1, 0);
+    }
+    kfree((void*)p->kpagetable);
+    p->kpagetable = 0;
+  }
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -473,6 +508,11 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // Change page table
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
@@ -485,6 +525,9 @@ scheduler(void)
     }
 #if !defined (LAB_FS)
     if(found == 0) {
+      intr_on();
+      w_satp(MAKE_SATP(kernel_pagetable));
+      sfence_vma();
       intr_on();
       asm volatile("wfi");
     }
