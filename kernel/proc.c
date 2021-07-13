@@ -39,9 +39,11 @@ procinit(void)
     char *pa = kalloc();
     if(pa == 0)
       panic("kalloc");
+    /*********Moved to allocporc*********/
     //uint64 va = KSTACK((int) (p - proc));
     //kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
     //p->kstack = va;
+    /*********Moved to allocporc*********/
     p->kstack = (uint64)pa;
   }
   kvminithart();
@@ -130,10 +132,8 @@ found:
     release(&p->lock);
     return 0;
   }
-  //for(int i = 0; i < (1<<9); ++i){
-  //  p->kpagetable[i] = kernel_pagetable[i];
-  //}
-  memmove(p->kpagetable, kernel_pagetable, sizeof(kernel_pagetable)*(1<<9));
+  //memmove(p->kpagetable, kernel_pagetable, sizeof(kernel_pagetable)*(1<<9));
+  kvmcopyinit(p->kpagetable, kernel_pagetable);
   
   //allocate kernel stack to page table
   uint64 pa = (uint64)(p->kstack);
@@ -174,7 +174,8 @@ freeproc(struct proc *p)
       p->kstack = kstack_pa;
       uvmunmap(p->kpagetable, kstack_va, 1, 0);
     }
-    kfree((void*)p->kpagetable);
+    //kfree((void*)p->kpagetable);
+    kvmfree(p->kpagetable);
     p->kpagetable = 0;
   }
   p->sz = 0;
@@ -253,7 +254,7 @@ userinit(void)
   
   // allocate one user page and copy init's instructions
   // and data into it.
-  uvminit(p->pagetable, initcode, sizeof(initcode));
+  uvminit(p->pagetable, p->kpagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
@@ -278,10 +279,11 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    if((sz = uvmalloc(p->pagetable, p->kpagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
+    kvmdealloc(p->kpagetable, sz, sz+n);
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
@@ -303,7 +305,7 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, np->kpagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;

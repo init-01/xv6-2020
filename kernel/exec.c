@@ -18,7 +18,7 @@ exec(char *path, char **argv)
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
-  pagetable_t pagetable = 0, oldpagetable;
+  pagetable_t pagetable = 0, oldpagetable, backup = 0;
   struct proc *p = myproc();
 
   begin_op();
@@ -35,6 +35,8 @@ exec(char *path, char **argv)
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
+  if((backup = kvmbackup(p->kpagetable)) == 0)
+    goto bad;
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
@@ -49,7 +51,7 @@ exec(char *path, char **argv)
     if(ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
     uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
+    if((sz1 = uvmalloc(pagetable, p->kpagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
@@ -68,10 +70,11 @@ exec(char *path, char **argv)
   // Use the second as the user stack.
   sz = PGROUNDUP(sz);
   uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + 2*PGSIZE)) == 0)
+  if((sz1 = uvmalloc(pagetable, p->kpagetable, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
   sz = sz1;
   uvmclear(pagetable, sz-2*PGSIZE);
+  kvmclear(p->kpagetable, sz-2*PGSIZE);
   sp = sz;
   stackbase = sp - PGSIZE;
 
@@ -115,6 +118,7 @@ exec(char *path, char **argv)
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+  kvmclearbackup(backup);
 
   if(p->pid == 1){
     vmprint(p->pagetable);
@@ -122,6 +126,10 @@ exec(char *path, char **argv)
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
+  if(backup){
+    kvmclean(p->kpagetable);
+    kvmrestore(p->kpagetable, backup);
+  }
   if(pagetable)
     proc_freepagetable(pagetable, sz);
   if(ip){

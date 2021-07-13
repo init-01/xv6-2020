@@ -233,7 +233,7 @@ uvmcreate()
 // for the very first process.
 // sz must be less than a page.
 void
-uvminit(pagetable_t pagetable, uchar *src, uint sz)
+uvminit(pagetable_t pagetable, pagetable_t kpagetable, uchar *src, uint sz)
 {
   char *mem;
 
@@ -242,16 +242,21 @@ uvminit(pagetable_t pagetable, uchar *src, uint sz)
   mem = kalloc();
   memset(mem, 0, PGSIZE);
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
+  mappages(kpagetable, 0, PGSIZE, (uint64)mem, PTE_R|PTE_W|PTE_X);
   memmove(mem, src, sz);
 }
 
 // Allocate PTEs and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
 uint64
-uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+uvmalloc(pagetable_t pagetable, pagetable_t kpagetable, uint64 oldsz, uint64 newsz)
 {
-  char *mem;
+  char *mem = 0;
   uint64 a;
+
+  if(newsz > PLIC){
+    return 0;
+  }
 
   if(newsz < oldsz)
     return oldsz;
@@ -260,16 +265,24 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   for(a = oldsz; a < newsz; a += PGSIZE){
     mem = kalloc();
     if(mem == 0){
+      kvmdealloc(kpagetable, a, oldsz);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
     memset(mem, 0, PGSIZE);
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
       kfree(mem);
+      kvmdealloc(kpagetable, a, oldsz);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
+    if(mappages(kpagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_W|PTE_X) != 0){
+      kvmdealloc(kpagetable, a, oldsz);
+      uvmdealloc(pagetable, a+PGSIZE, oldsz);
+      return 0;
+    }
   }
+
   return newsz;
 }
 
@@ -328,7 +341,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
-uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+uvmcopy(pagetable_t old, pagetable_t new, pagetable_t knew, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
@@ -349,9 +362,16 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       kfree(mem);
       goto err;
     }
+    flags &= ~PTE_U;
+    if(mappages(knew, i, PGSIZE, (uint64)mem, flags) != 0){
+      kfree(mem);
+      goto kerr;
+    }
   }
   return 0;
 
+ kerr:
+  uvmunmap(knew, 0, i / PGSIZE, 1);
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
@@ -401,8 +421,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
+  //*
+  return copyin_new(pagetable, dst, srcva, len);
+  /*/
   uint64 n, va0, pa0;
-
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -412,12 +434,12 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     if(n > len)
       n = len;
     memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
     len -= n;
     dst += n;
     srcva = va0 + PGSIZE;
   }
   return 0;
+  //*/
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -427,9 +449,11 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+  //*
+  return copyinstr_new(pagetable, dst, srcva, max);
+  /*/
   uint64 n, va0, pa0;
   int got_null = 0;
-
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -438,7 +462,6 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
-
     char *p = (char *) (pa0 + (srcva - va0));
     while(n > 0){
       if(*p == '\0'){
@@ -453,7 +476,6 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
       p++;
       dst++;
     }
-
     srcva = va0 + PGSIZE;
   }
   if(got_null){
@@ -461,6 +483,7 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+  //*/
 }
 
 
@@ -492,4 +515,111 @@ void vmprint(pagetable_t pagetable){
       }
     }
   }
+}
+
+
+// Make new kernel page table by copying from source kernel page table
+// Does not copy user memory area
+void
+kvmcopyinit(pagetable_t dsttable, pagetable_t srctable)
+{
+  memset(dsttable, 0, PGSIZE);
+
+  for(int i = 1; i < (1<<9); ++i){
+    dsttable[i] = srctable[i];
+  }
+
+  pagetable_t dsttbl_lv1_0 = (pagetable_t)kalloc();
+  if(!dsttbl_lv1_0)
+    panic("kalloc: not enough memory\n");
+  pagetable_t srctbl_lv1_0 = (pagetable_t)PTE2PA(srctable[0]);
+  memset(dsttbl_lv1_0, 0, PGSIZE);
+  dsttable[0] = PA2PTE(dsttbl_lv1_0) | PTE_V;
+  for(int i = (PLIC >> (9+12)); i < (1<<9); i++){
+    dsttbl_lv1_0[i] = srctbl_lv1_0[i];
+  }
+}
+
+// Free kernel page table made from kvmcopyinit
+void kvmfree(pagetable_t kpagetable){
+  pagetable_t pgtbl_lv1_0 = (pagetable_t)PTE2PA(kpagetable[0]);
+  for(int i = 0; i < (PLIC >> (9+12)); i++){
+    if(pgtbl_lv1_0[i] && PTE_V)
+      kfree((void*)(PTE2PA(pgtbl_lv1_0[i])));
+  }
+  kfree((void*)pgtbl_lv1_0);
+  kfree((void*)kpagetable);
+}
+
+// Clean user page area in kernel page table
+void kvmclean(pagetable_t kpagetable){
+  pagetable_t pgtbl_lv1_0 = (pagetable_t)PTE2PA(kpagetable[0]);
+  for(int i = 0; i < (PLIC >> (9+12)); i++){
+    if(pgtbl_lv1_0[i] && PTE_V){
+      kfree((void*)(PTE2PA(pgtbl_lv1_0[i])));
+      pgtbl_lv1_0[i] = 0;
+    }
+  }
+}
+
+// Backup user mapping in kernel page table
+// User mapping will be erased.
+pagetable_t kvmbackup(pagetable_t kpagetable){
+  pagetable_t backup;
+  if((backup = (pagetable_t)kalloc()) == 0){
+    return 0;
+  }
+  
+  //backup kpagetable
+  memset(backup, 0, PGSIZE);
+  pagetable_t pgtbl_lv1_0 = (pagetable_t)PTE2PA(kpagetable[0]);
+  for(int i = 0; i < (PLIC >> (9+12)); ++i){
+    backup[i] = pgtbl_lv1_0[i];
+    pgtbl_lv1_0[i] = 0;
+  }
+  return backup;
+}
+
+// Restore kernel page table from user page table
+// and free backup
+void kvmrestore(pagetable_t kpagetable, pagetable_t backup){
+  pagetable_t pgtbl_lv1_0 = (pagetable_t)PTE2PA(kpagetable[0]);
+  for(int i = 0; i < (PLIC >> (9+12)); i++)
+    pgtbl_lv1_0[i] = backup[i];
+  kfree(backup);
+}
+
+// Clear backup page table made from kvmbackup
+void kvmclearbackup(pagetable_t backup){
+  for(int i = 0; i < (PLIC >> (9+12)); i++)
+    if(backup[i] && PTE_V)
+      kfree((void*)(PTE2PA(backup[i])));
+  kfree(backup);
+}
+
+// same as uvmdealloc, but only unmapps va from kernel page table.
+// freeing memory is uvmdealloc's job
+uint64
+kvmdealloc(pagetable_t kpagetable, uint64 oldsz, uint64 newsz)
+{
+  if(newsz >= oldsz)
+    return oldsz;
+
+  if(PGROUNDUP(newsz) < PGROUNDUP(oldsz)){
+    int npages = (PGROUNDUP(oldsz) - PGROUNDUP(newsz)) / PGSIZE;
+    uvmunmap(kpagetable, PGROUNDUP(newsz), npages, 0);
+  }
+
+  return newsz;
+}
+
+// same as uvmclear
+void
+kvmclear(pagetable_t kpagetable, uint64 va){
+  pte_t *pte;
+  
+  pte = walk(kpagetable, va, 0);
+  if(pte == 0)
+    panic("kvmclear");
+  *pte |= PTE_U;
 }
