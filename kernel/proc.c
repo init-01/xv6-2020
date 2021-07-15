@@ -40,6 +40,10 @@ procinit(void)
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
+
+      p->alarm_ticks = 0;
+      p->alarm_handler = 0;
+      p->alarm_counter = 0;
   }
   kvminithart();
 }
@@ -112,6 +116,8 @@ found:
     release(&p->lock);
     return 0;
   }
+  // Ma! joengeon gachisseouja!
+  p->userframe = (struct userframe *)((char*)p->trapframe + sizeof(*p->trapframe));
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
