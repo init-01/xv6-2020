@@ -12,8 +12,10 @@ struct entry {
   int key;
   int value;
   struct entry *next;
+  pthread_mutex_t lock;
 };
 struct entry *table[NBUCKET];
+pthread_mutex_t tablelock[NBUCKET] = {PTHREAD_MUTEX_INITIALIZER};
 int keys[NKEYS];
 int nthread = 1;
 
@@ -29,6 +31,7 @@ static void
 insert(int key, int value, struct entry **p, struct entry *n)
 {
   struct entry *e = malloc(sizeof(struct entry));
+  pthread_mutex_init(&e->lock, NULL);
   e->key = key;
   e->value = value;
   e->next = n;
@@ -48,10 +51,14 @@ void put(int key, int value)
   }
   if(e){
     // update the existing key.
+    pthread_mutex_lock(&e->lock);
     e->value = value;
+    pthread_mutex_unlock(&e->lock);
   } else {
     // the new is new.
+    pthread_mutex_lock(&tablelock[i]);
     insert(key, value, &table[i], table[i]);
+    pthread_mutex_unlock(&tablelock[i]);
   }
 }
 
