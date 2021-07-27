@@ -1,0 +1,1 @@
+next or ptr can change by other put thread
