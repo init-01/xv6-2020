@@ -36,7 +36,6 @@ kinit()
     initlock(&kmem_all[i].lock, locknames[i]);
   }
   freerange(end, (void*)PHYSTOP);
-  printf("kinit done\n");
 }
 
 void

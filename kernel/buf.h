@@ -1,4 +1,5 @@
 struct buf {
+  uint bufnum;
   int valid;   // has data been read from disk?
   int disk;    // does disk "own" buf?
   uint dev;
