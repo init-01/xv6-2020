@@ -40,12 +40,12 @@ _v1(char *p)
   for (i = 0; i < PGSIZE*2; i++) {
     if (i < PGSIZE + (PGSIZE/2)) {
       if (p[i] != 'A') {
-        printf("mismatch at %d, wanted 'A', got 0x%x\n", i, p[i]);
+        printf("mismatch at %d (addr %p), wanted 'A', got 0x%x\n", i, &p[i], p[i]);
         err("v1 mismatch (1)");
       }
     } else {
       if (p[i] != 0) {
-        printf("mismatch at %d, wanted zero, got 0x%x\n", i, p[i]);
+        printf("mismatch at %d (addr %p), wanted zero, got 0x%x\n", i, &p[i], p[i]);
         err("v1 mismatch (2)");
       }
     }
@@ -235,7 +235,9 @@ mmap_test(void)
   munmap(p1, PGSIZE);
   if(memcmp(p2, "67890", 5) != 0)
     err("mmap2 mismatch (2)");
-  munmap(p2, PGSIZE);
+  int ret = munmap(p2, PGSIZE);
+  if(ret != 0)
+    err("mmap2 closing error!");
   
   printf("test mmap two files: OK\n");
   
@@ -272,6 +274,7 @@ fork_test(void)
   if(*(p1+PGSIZE) != 'A')
     err("fork mismatch (1)");
 
+  printf("forking\n");
   if((pid = fork()) < 0)
     err("fork");
   if (pid == 0) {

@@ -1,6 +1,7 @@
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
   int ref; // reference count
+  int mmapref;
   char readable;
   char writable;
   struct pipe *pipe; // FD_PIPE

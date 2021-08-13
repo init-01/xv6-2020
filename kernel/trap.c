@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -67,14 +71,97 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 va = r_stval();
+    if(va >= p->sz){
+      //invalid address
+      p->killed = 1;
+      goto end;
+    }
+    if(va < PGROUNDDOWN(p->trapframe->sp)){
+      p->killed = 1;
+      goto end;
+    }
+
+    int fd = 0;
+    uint64 addr = 0;
+    uint length = 0, offset, flags;
+    int prot;
+    struct mmapinfo *m;
+
+
+    // find which file descriptor this va is mapped
+    m = p->mmapinfo;
+    while(m){
+      if(m->addr <= va && va < m->addr + m->length){
+        break;
+      }
+      m = m->next;
+    }
+    if(!m){
+      p->killed = 1;
+      goto end;
+    }
+    fd = m->fd;
+    addr = m->addr;
+    offset = m->offset;
+    flags = m->flags;
+    prot = m->prot;
+
+    va = PGROUNDDOWN(va);
+    pte_t *pte = walk(p->pagetable, va, 0);
+    struct file *f = p->ofile[fd];
+
+    length = m->length < f->ip->size? m->length : f->ip->size;
+    uint64 fstart = va - addr + offset;
+    uint64 flen = (length - fstart) > PGSIZE? PGSIZE : (length - fstart);
+
+    if(pte == 0 || (*pte & PTE_U) == 0){
+      // map page
+      char *mem = kalloc();
+      if(!mem){
+        //kalloc error!
+        printf("usertrap: kalloc error!\n");
+        p->killed = 1;
+        goto end;
+      }
+      memset(mem, 0, PGSIZE);
+      int pte_flags = PTE_U;
+      if(prot & PROT_READ)
+        pte_flags |= PTE_R;
+      if(prot & PROT_EXEC)
+        pte_flags |= PTE_X;
+      if((flags & MAP_PRIVATE) || (prot & PROT_WRITE))
+        pte_flags |= PTE_W;
+      if(flags & MAP_SHARED)
+        pte_flags |= PTE_S;
+      if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, pte_flags) != 0){
+        kfree(mem);
+        //mappage error!
+        printf("usertrap: mappage error!\n");
+        p->killed = 1;
+        goto end;
+      }
+      // load file from memory
+      begin_op();
+      ilock(f->ip);
+      readi(f->ip, 0, (uint64)mem, fstart, flen);
+      iunlock(f->ip);
+      end_op();
+    }
+    else{
+      printf("why are you here?\n");
+    }
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if(p->killed)
+ end:
+  if(p->killed){
+    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     exit(-1);
+  }
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)

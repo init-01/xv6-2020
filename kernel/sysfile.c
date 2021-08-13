@@ -99,8 +99,10 @@ sys_close(void)
 
   if(argfd(0, &fd, &f) < 0)
     return -1;
-  myproc()->ofile[fd] = 0;
+  //myproc()->ofile[fd] = 0;
   fileclose(f);
+  if(file_get_mmapref(f) == 0)
+    myproc()->ofile[fd] = 0;
   return 0;
 }
 
@@ -482,5 +484,110 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, offset;
+  int prot, flags, fd;
+  struct file *f;
+  struct proc *p;
+  struct mmapinfo *m;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 || argint(4, &fd) < 0 || argint(5, &offset) < 0)
+    return -1;
+    
+  p = myproc();
+  //check prot
+  if((f = p->ofile[fd]) == 0)
+    return -1;
+  if(((prot & PROT_READ) && !(f->readable)) || (!(flags & MAP_PRIVATE) && (prot & PROT_WRITE) && !(f->writable)))
+    return -1;
+  if((m = mmapalloc()) == 0)
+    return -1;
+
+  //lazy allocation
+  if(addr == 0){
+    addr = p->sz;
+  }
+  p->sz += length;
+
+  filedup(f);
+  file_inc_mmapref(f);
+
+  m->fd = fd;
+  m->start = addr;
+  m->size = length;
+  m->addr = addr;
+  m->length = length;
+  m->flags = flags;
+  m->prot = prot;
+  m->offset = offset;
+  m->next = p->mmapinfo;
+  p->mmapinfo = m;
+
+  return addr;
+}
+
+int
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0){
+    return -1;
+  }
+  struct proc* p = myproc();
+  pagetable_t ptb = p->pagetable;
+  struct mmapinfo *m = p->mmapinfo, *mp = 0;
+  while(m){
+    if(m->addr <= addr && addr + length <= m->addr + m->length){
+      break;
+    }
+    mp = m;
+    m = m->next;
+  }
+  if(!m){
+    return -1;
+  }
+
+  struct file *f = p->ofile[m->fd];
+
+  writeback(ptb, f, m);
+
+  if((addr == m->addr) && (length == m->length)){
+    fileclose(f);
+    int mmapref = file_dec_mmapref(f);
+
+    if(mmapref == 0){
+      if(f->ref == 0)
+        p->ofile[m->fd] = 0;
+      uvmunshare(ptb, m->start, m->size);
+      uvmunmap(ptb, PGROUNDDOWN(m->start), PGROUNDUP(m->size)/PGSIZE, 1);
+      m->fd = -1;
+      m->start = 0;
+      m->size = 0;
+      m->addr = 0;
+      m->flags = 0;
+      m->length = 0;
+      m->offset = 0;
+      m->prot = 0;
+      if(!mp)
+        p->mmapinfo = m->next;
+      else
+        mp->next = m->next;
+      mmapfree(m);
+    }
+
+  }
+  else{
+    m->addr = addr == m->addr? m->addr + length : m->addr;
+    m->length -= length;
+    m->offset += addr == m->addr? length : m->offset;
+  }
+  
   return 0;
 }

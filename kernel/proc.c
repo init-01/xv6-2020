@@ -4,6 +4,10 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 #include "defs.h"
 
 struct cpu cpus[NCPU];
@@ -18,8 +22,16 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
+static void mmapinit(void);
 
 extern char trampoline[]; // trampoline.S
+
+struct {
+  struct spinlock lock;
+  struct mmapinfo m[NOFILE];
+  struct mmapinfo *freelist;
+} mmap;
+
 
 
 // Allocate a page for each process's kernel stack.
@@ -49,6 +61,7 @@ procinit(void)
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
   }
+  mmapinit();
 }
 
 // Must be called with interrupts disabled,
@@ -268,6 +281,7 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
+  struct mmapinfo *m, *nm;
 
   // Allocate process.
   if((np = allocproc()) == 0){
@@ -294,6 +308,38 @@ fork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+
+  m = p->mmapinfo;
+  while(m){
+    if(!(m->flags & MAP_SHARED)){
+      m = m->next;
+      continue;
+    }
+    nm = mmapalloc();
+    if(!nm){
+      nm = np->mmapinfo;
+      np->mmapinfo = nm->next;
+      while(nm){
+        np->mmapinfo = nm->next;
+        fileclose(p->ofile[nm->fd]);
+        int mmapref = file_dec_mmapref(p->ofile[nm->fd]);
+        printf("fork: mmapref of fd %d: %d\n", m->fd, mmapref);
+        mmapfree(nm);
+        nm = np->mmapinfo;
+      }
+      for(i = 0; i < NOFILE; i++)
+        if(p->ofile[i])
+          fileclose(p->ofile[i]);
+      return -1;
+    }
+    filedup(p->ofile[m->fd]);
+    int mmapref = file_inc_mmapref(p->ofile[m->fd]);
+    printf("fork: mmapref of fd %d: %d\n", m->fd, mmapref);
+    *nm = *m;
+    nm->next = np->mmapinfo;
+    np->mmapinfo = nm;
+    m = m->next;
+  }
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -303,6 +349,10 @@ fork(void)
   np->state = RUNNABLE;
 
   release(&np->lock);
+  //pte_t *pte = walk(np->pagetable, 0xe000, 0);
+  //uint64 pa = PTE2PA(*pte);
+  //uint64 perm = PTE_FLAGS(*pte);
+  //printf("va %p is mapped to pa %p, R: %d, W: %d, X: %d, U: %d, S: %d, V: %d\n", 0xe000, pa, perm & PTE_R, perm & PTE_W, perm & PTE_X, perm & PTE_U, perm & PTE_S, perm & PTE_V);
 
   return pid;
 }
@@ -340,6 +390,7 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
+  struct mmapinfo *m = p->mmapinfo;
 
   if(p == initproc)
     panic("init exiting");
@@ -349,6 +400,23 @@ exit(int status)
     if(p->ofile[fd]){
       struct file *f = p->ofile[fd];
       fileclose(f);
+    }
+  }
+
+  while(m){
+    struct file *f = p->ofile[m->fd];
+    fileclose(f);
+    int mmapref = file_dec_mmapref(f);
+    printf("exit: mmapref of fd %d: %d\n", m->fd, mmapref);
+    if(mmapref == 0)
+      uvmunshare(p->pagetable, m->start, m->size);
+    p->mmapinfo = p->mmapinfo->next;
+    mmapfree(m);
+    m = p->mmapinfo;
+  }
+
+  for(int fd = 0; fd < NOFILE; fd++){
+    if(p->ofile[fd]){
       p->ofile[fd] = 0;
     }
   }
@@ -701,3 +769,53 @@ procdump(void)
     printf("\n");
   }
 }
+
+static void
+mmapinit(void)
+{
+  initlock(&mmap.lock, "mmap");
+  for(int i = 0; i < NOFILE - 1; i++){
+    mmap.m[i].next = &mmap.m[i+1];
+  }
+  mmap.freelist = &mmap.m[0];
+}
+
+struct mmapinfo *
+mmapalloc(void)
+{
+  acquire(&mmap.lock);
+  struct mmapinfo *m = mmap.freelist;
+  mmap.freelist = m->next;
+  release(&mmap.lock);
+  //printf("mmapalloc: %p\n", m);
+  return m;
+}
+
+void
+mmapfree(struct mmapinfo *m)
+{
+  //printf("mmapfree: %p\n", m);
+  acquire(&mmap.lock);
+  m->next = mmap.freelist->next;
+  mmap.freelist = m;
+  release(&mmap.lock);
+}
+
+void
+writeback(pagetable_t ptb, struct file *f, struct mmapinfo *mmapinfo)
+{
+  //printf("writeback: prot %x flags %x\n", mmapinfo->prot, mmapinfo->flags);
+  if(!(mmapinfo->prot & PROT_WRITE) || !(mmapinfo->flags & MAP_SHARED))
+    return;
+  uint64 addr = mmapinfo->addr;
+  //uint64 length = mmapinfo->length;
+  uint64 offset = mmapinfo->offset;
+  //printf("writing %d bytes from memory %d to file %d\n", length, addr, offset);
+  begin_op();
+  ilock(f->ip);
+  writei(f->ip, 1, addr, offset, f->ip->size - offset);
+  iunlock(f->ip);
+  end_op();
+}
+
+

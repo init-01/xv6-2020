@@ -180,3 +180,50 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+// get mmapref
+int
+file_get_mmapref(struct file *f)
+{
+  int mmapref;
+  acquire(&ftable.lock);
+  mmapref = f->mmapref;
+  release(&ftable.lock);
+  return mmapref;
+}
+
+// set mmapref
+void
+file_set_mmapref(struct file *f, uint ref)
+{
+  acquire(&ftable.lock);
+  f->mmapref = ref;
+  release(&ftable.lock);
+}
+
+// increase mmapref
+int
+file_inc_mmapref(struct file *f)
+{
+  int mmapref;
+  acquire(&ftable.lock);
+  if(f->mmapref < 0)
+    panic("file_inc_mmapref");
+  ++f->mmapref;
+  mmapref = f->mmapref;
+  release(&ftable.lock);
+  return mmapref;
+}
+
+// decrease mmapref
+int
+file_dec_mmapref(struct file *f)
+{
+  int mmapref;
+  acquire(&ftable.lock);
+  if(f->mmapref < 1)
+    panic("file_dec_mmapref");
+  --f->mmapref;
+  mmapref = f->mmapref;
+  release(&ftable.lock);
+  return mmapref;
+}
